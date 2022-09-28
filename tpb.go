@@ -168,3 +168,12 @@ func (b *Buffer) Bytes() []byte {
 	b.buffers = b.buffers[:0]
 	return ret
 }
+
+// Reset discards the contents back to the pool. The Buffer can be reused after this.
+func (b *Buffer) Reset() {
+	for i, bs := range b.buffers {
+		b.returnByteSlice(bs)
+		b.buffers[i] = nil
+	}
+	b.buffers = b.buffers[:0]
+}
