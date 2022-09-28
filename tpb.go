@@ -160,7 +160,8 @@ func (b *Buffer) Len() int {
 func (b *Buffer) Bytes() []byte {
 	ret := make([]byte, 0, b.Len())
 	for i, bs := range b.buffers {
-		copy(ret[len(ret):cap(ret)], bs)
+		n := copy(ret[len(ret):cap(ret)], bs)
+		ret = ret[:len(ret)+n]
 		b.returnByteSlice(bs)
 		b.buffers[i] = nil
 	}
