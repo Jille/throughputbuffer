@@ -50,6 +50,7 @@ var _ io.Writer = &Buffer{}
 var _ io.ReaderFrom = &Buffer{}
 var _ io.WriterTo = &Buffer{}
 
+// Write the data into the buffer and return len(p), nil. It always returns a nil error.
 func (b *Buffer) Write(p []byte) (int, error) {
 	if len(b.buffers) == 0 {
 		b.buffers = append(b.buffers, b.parent.getByteSlice())
@@ -69,6 +70,7 @@ func (b *Buffer) Write(p []byte) (int, error) {
 	return ret, nil
 }
 
+// ReadFrom reads all data from r and return the number of bytes read and the error from the reader.
 func (b *Buffer) ReadFrom(r io.Reader) (int64, error) {
 	if len(b.buffers) == 0 {
 		b.buffers = append(b.buffers, b.parent.getByteSlice())
@@ -102,6 +104,7 @@ func (b *Buffer) returnByteSlice(bs []byte) {
 	}
 }
 
+// Read consumes len(p) bytes from the buffer (or less if the buffer is smaller). The only error it can return is io.EOF.
 func (b *Buffer) Read(p []byte) (int, error) {
 	var ret int
 	for len(b.buffers) > 0 {
@@ -125,6 +128,9 @@ func (b *Buffer) Read(p []byte) (int, error) {
 	return ret, io.EOF
 }
 
+// WriteTo calls w.Write() repeatedly with all the data in the buffer. Any returned error is straight from w.Write().
+// If an error is returned, the Buffer will have consumed those bytes but is otherwise still usable.
+// If no error is returned, the Buffer will be empty after this.
 func (b *Buffer) WriteTo(w io.Writer) (int64, error) {
 	var ret int64
 	for len(b.buffers) > 0 {
@@ -148,6 +154,7 @@ func (b *Buffer) WriteTo(w io.Writer) (int64, error) {
 	return ret, nil
 }
 
+// Len returns the number of bytes in the buffer.
 func (b *Buffer) Len() int {
 	var ret int
 	for _, bs := range b.buffers {
