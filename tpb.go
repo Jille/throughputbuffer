@@ -49,7 +49,7 @@ func (p *BufferPool) newDataChunk() dataChunk {
 type dataChunk struct {
 	// data contains the unread bytes in this buffer. Bytes between the length and capacity can be written to.
 	data []byte
-	// head is the original start of this buffer. Once this buffer is done, we need this to return it to the pool.
+	// head is the original start of this buffer. Once this dataChunk is consumed, we need this to return the full byte slice to the pool.
 	head []byte
 	// refcnt is an optional refcnt (or nil), used only when this buffer was Cloned.
 	refcnt *int32
