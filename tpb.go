@@ -7,6 +7,7 @@ package throughputbuffer
 import (
 	"io"
 	"sync"
+	"sync/atomic"
 )
 
 // BufferPool holds a sync.Pool of byte slices and can be used to create new Buffers.
@@ -29,7 +30,7 @@ func New(blocksize int) *BufferPool {
 func (p *BufferPool) Get() *Buffer {
 	return &Buffer{
 		parent:  p,
-		buffers: make([][]byte, 0, 32),
+		buffers: make([]dataChunk, 0, 32),
 	}
 }
 
@@ -37,12 +38,28 @@ func (p *BufferPool) getByteSlice() []byte {
 	return p.pool.Get().([]byte)[:0]
 }
 
+func (p *BufferPool) newDataChunk() dataChunk {
+	b := p.getByteSlice()
+	return dataChunk{
+		data: b,
+		head: b,
+	}
+}
+
+type dataChunk struct {
+	// data contains the unread bytes in this buffer. Bytes between the length and capacity can be written to.
+	data []byte
+	// head is the original start of this buffer. Once this buffer is done, we need this to return it to the pool.
+	head []byte
+	// refcnt is an optional refcnt (or nil), used only when this buffer was Cloned.
+	refcnt *int32
+}
+
 // Buffer is a io.ReadWriter that can grow infinitely and does the minimum amount of copies (1 per read + 1 per write) and never has to move bytes.
 type Buffer struct {
 	parent *BufferPool
 
-	buffers     [][]byte
-	readBufHead []byte
+	buffers []dataChunk
 }
 
 var _ io.Reader = &Buffer{}
@@ -53,18 +70,18 @@ var _ io.WriterTo = &Buffer{}
 // Write the data into the buffer and return len(p), nil. It always returns a nil error.
 func (b *Buffer) Write(p []byte) (int, error) {
 	if len(b.buffers) == 0 {
-		b.buffers = append(b.buffers, b.parent.getByteSlice())
+		b.buffers = append(b.buffers, b.parent.newDataChunk())
 	}
 	ret := len(p)
 	for len(p) > 0 {
-		bs := b.buffers[len(b.buffers)-1]
-		if len(bs) < cap(bs) {
-			target := bs[len(bs):cap(bs)]
+		buf := b.buffers[len(b.buffers)-1]
+		if len(buf.data) < cap(buf.data) && (buf.refcnt == nil || atomic.LoadInt32(buf.refcnt) == 1) {
+			target := buf.data[len(buf.data):cap(buf.data)]
 			n := copy(target, p)
-			b.buffers[len(b.buffers)-1] = bs[:len(bs)+n]
+			b.buffers[len(b.buffers)-1].data = buf.data[:len(buf.data)+n]
 			p = p[n:]
 		} else {
-			b.buffers = append(b.buffers, b.parent.getByteSlice())
+			b.buffers = append(b.buffers, b.parent.newDataChunk())
 		}
 	}
 	return ret, nil
@@ -73,15 +90,15 @@ func (b *Buffer) Write(p []byte) (int, error) {
 // ReadFrom reads all data from r and return the number of bytes read and the error from the reader.
 func (b *Buffer) ReadFrom(r io.Reader) (int64, error) {
 	if len(b.buffers) == 0 {
-		b.buffers = append(b.buffers, b.parent.getByteSlice())
+		b.buffers = append(b.buffers, b.parent.newDataChunk())
 	}
 	var ret int64
 	for {
-		bs := b.buffers[len(b.buffers)-1]
-		if len(bs) < cap(bs) {
-			target := bs[len(bs):cap(bs)]
+		buf := b.buffers[len(b.buffers)-1]
+		if len(buf.data) < cap(buf.data) && (buf.refcnt == nil || atomic.LoadInt32(buf.refcnt) == 1) {
+			target := buf.data[len(buf.data):cap(buf.data)]
 			n, err := r.Read(target)
-			b.buffers[len(b.buffers)-1] = bs[:len(bs)+n]
+			b.buffers[len(b.buffers)-1].data = buf.data[:len(buf.data)+n]
 			ret += int64(n)
 			if err == io.EOF {
 				return ret, nil
@@ -90,35 +107,32 @@ func (b *Buffer) ReadFrom(r io.Reader) (int64, error) {
 				return ret, err
 			}
 		} else {
-			b.buffers = append(b.buffers, b.parent.getByteSlice())
+			b.buffers = append(b.buffers, b.parent.newDataChunk())
 		}
 	}
 }
 
-func (b *Buffer) returnByteSlice(bs []byte) {
-	if b.readBufHead != nil {
-		b.parent.pool.Put(b.readBufHead)
-		b.readBufHead = nil
-	} else {
-		b.parent.pool.Put(bs)
+func (b *Buffer) returnDataChunk(buf dataChunk) {
+	if buf.refcnt != nil {
+		if atomic.AddInt32(buf.refcnt, -1) > 0 {
+			return
+		}
 	}
+	b.parent.pool.Put(buf.head)
 }
 
 // Read consumes len(p) bytes from the buffer (or less if the buffer is smaller). The only error it can return is io.EOF.
 func (b *Buffer) Read(p []byte) (int, error) {
 	var ret int
 	for len(b.buffers) > 0 {
-		bs := b.buffers[0]
-		n := copy(p[ret:], bs)
-		if n == len(bs) {
-			b.returnByteSlice(bs)
-			b.buffers[0] = nil
+		buf := b.buffers[0]
+		n := copy(p[ret:], buf.data)
+		if n == len(buf.data) {
+			b.returnDataChunk(buf)
+			b.buffers[0] = dataChunk{}
 			b.buffers = b.buffers[1:]
 		} else {
-			if b.readBufHead == nil {
-				b.readBufHead = bs
-			}
-			b.buffers[0] = bs[n:]
+			b.buffers[0].data = buf.data[n:]
 		}
 		ret += n
 		if ret == len(p) {
@@ -134,18 +148,15 @@ func (b *Buffer) Read(p []byte) (int, error) {
 func (b *Buffer) WriteTo(w io.Writer) (int64, error) {
 	var ret int64
 	for len(b.buffers) > 0 {
-		bs := b.buffers[0]
-		n, err := w.Write(bs)
+		buf := b.buffers[0]
+		n, err := w.Write(buf.data)
 		ret += int64(n)
-		if n == len(bs) {
-			b.returnByteSlice(bs)
-			b.buffers[0] = nil
+		if n == len(buf.data) {
+			b.returnDataChunk(buf)
+			b.buffers[0] = dataChunk{}
 			b.buffers = b.buffers[1:]
 		} else {
-			if b.readBufHead == nil {
-				b.readBufHead = bs
-			}
-			b.buffers[0] = bs[n:]
+			b.buffers[0].data = buf.data[n:]
 		}
 		if err != nil {
 			return ret, err
@@ -157,8 +168,8 @@ func (b *Buffer) WriteTo(w io.Writer) (int64, error) {
 // Len returns the number of bytes in the buffer.
 func (b *Buffer) Len() int {
 	var ret int
-	for _, bs := range b.buffers {
-		ret += len(bs)
+	for _, buf := range b.buffers {
+		ret += len(buf.data)
 	}
 	return ret
 }
@@ -166,11 +177,11 @@ func (b *Buffer) Len() int {
 // Bytes consumes all the data and returns it as a byte slice.
 func (b *Buffer) Bytes() []byte {
 	ret := make([]byte, 0, b.Len())
-	for i, bs := range b.buffers {
-		n := copy(ret[len(ret):cap(ret)], bs)
+	for i, buf := range b.buffers {
+		n := copy(ret[len(ret):cap(ret)], buf.data)
 		ret = ret[:len(ret)+n]
-		b.returnByteSlice(bs)
-		b.buffers[i] = nil
+		b.returnDataChunk(buf)
+		b.buffers[i] = dataChunk{}
 	}
 	b.buffers = b.buffers[:0]
 	return ret
@@ -178,9 +189,24 @@ func (b *Buffer) Bytes() []byte {
 
 // Reset discards the contents back to the pool. The Buffer can be reused after this.
 func (b *Buffer) Reset() {
-	for i, bs := range b.buffers {
-		b.returnByteSlice(bs)
-		b.buffers[i] = nil
+	for i, buf := range b.buffers {
+		b.returnDataChunk(buf)
+		b.buffers[i] = dataChunk{}
 	}
 	b.buffers = b.buffers[:0]
+}
+
+func (b *Buffer) Clone() *Buffer {
+	for i, buf := range b.buffers {
+		if buf.refcnt == nil {
+			r := new(int32)
+			*r = 2
+			b.buffers[i].refcnt = r
+		} else {
+			atomic.AddInt32(buf.refcnt, 1)
+		}
+	}
+	n := b.parent.Get()
+	n.buffers = append(n.buffers, b.buffers...)
+	return n
 }
