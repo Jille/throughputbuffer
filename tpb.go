@@ -5,6 +5,7 @@
 package throughputbuffer
 
 import (
+	"fmt"
 	"io"
 	"sync"
 	"sync/atomic"
@@ -12,7 +13,7 @@ import (
 
 // BufferPool holds a sync.Pool of byte slices and can be used to create new Buffers.
 type BufferPool struct {
-	pool sync.Pool
+	pool *sync.Pool
 }
 
 // New creates a new BufferPool. The blockSize is the size of the []byte slices internally.
@@ -20,9 +21,17 @@ type BufferPool struct {
 // Using a larger blocksize results in more memory being held but unused, a smaller blocksize takes a bit more CPU cycles.
 func New(blocksize int) *BufferPool {
 	return &BufferPool{
-		pool: sync.Pool{
+		pool: &sync.Pool{
 			New: func() any { return make([]byte, blocksize) },
 		},
+	}
+}
+
+// NewFromPool creates a new BufferPool.
+// The pool must contain []byte or *[]byte as buffers. Used buffers are not zeroed before being returned to the pool. The pool's New function must be set.
+func NewFromPool(pool *sync.Pool) *BufferPool {
+	return &BufferPool{
+		pool: pool,
 	}
 }
 
@@ -34,23 +43,28 @@ func (p *BufferPool) Get() *Buffer {
 	}
 }
 
-func (p *BufferPool) getByteSlice() []byte {
-	return p.pool.Get().([]byte)[:0]
-}
-
 func (p *BufferPool) newDataChunk() dataChunk {
-	b := p.getByteSlice()
-	return dataChunk{
-		data: b,
-		head: b,
+	ret := dataChunk{
+		poolEntry: p.pool.Get(),
 	}
+	switch b := ret.poolEntry.(type) {
+	case []byte:
+		ret.data = b[:0]
+	case *[]byte:
+		ret.data = (*b)[:0]
+	case nil:
+		panic(fmt.Errorf("sync.Pool used for throughputbuffer returned nil: did you give it a pool without the New method set?"))
+	default:
+		panic(fmt.Errorf("sync.Pool used for throughputbuffer returned %T which is unsupported", ret.poolEntry))
+	}
+	return ret
 }
 
 type dataChunk struct {
 	// data contains the unread bytes in this buffer. Bytes between the length and capacity can be written to.
 	data []byte
-	// head is the original start of this buffer. Once this dataChunk is consumed, we need this to return the full byte slice to the pool.
-	head []byte
+	// poolEntry is the original start of this buffer. Once this dataChunk is consumed, we need this to return the full byte slice to the pool.
+	poolEntry any
 	// refcnt is an optional refcnt (or nil), used only when this buffer was Cloned.
 	refcnt *int32
 }
@@ -118,7 +132,7 @@ func (b *Buffer) returnDataChunk(buf dataChunk) {
 			return
 		}
 	}
-	b.parent.pool.Put(buf.head)
+	b.parent.pool.Put(buf.poolEntry)
 }
 
 // Read consumes len(p) bytes from the buffer (or less if the buffer is smaller). The only error it can return is io.EOF.
