@@ -139,15 +139,8 @@ func (b *Buffer) returnDataChunk(buf dataChunk) {
 func (b *Buffer) Read(p []byte) (int, error) {
 	var ret int
 	for len(b.buffers) > 0 {
-		buf := b.buffers[0]
-		n := copy(p[ret:], buf.data)
-		if n == len(buf.data) {
-			b.returnDataChunk(buf)
-			b.buffers[0] = dataChunk{}
-			b.buffers = b.buffers[1:]
-		} else {
-			b.buffers[0].data = buf.data[n:]
-		}
+		n := copy(p[ret:], b.buffers[0].data)
+		b.dropConsumed(n)
 		ret += n
 		if ret == len(p) {
 			return ret, nil
@@ -159,24 +152,35 @@ func (b *Buffer) Read(p []byte) (int, error) {
 // WriteTo calls w.Write() repeatedly with all the data in the buffer. Any returned error is straight from w.Write().
 // If an error is returned, the Buffer will have consumed those bytes but is otherwise still usable.
 // If no error is returned, the Buffer will be empty after this.
+// If the given Writer implements `syscall.Conn`, WriteTo will try to use `unix.Writev()`.
 func (b *Buffer) WriteTo(w io.Writer) (int64, error) {
-	var ret int64
+	// tryToWritev might do partial writes and leave the last buffer for a regular write.
+	ret, err := b.tryToWritev(w)
+	if err != nil {
+		return ret, err
+	}
 	for len(b.buffers) > 0 {
-		buf := b.buffers[0]
-		n, err := w.Write(buf.data)
+		n, err := w.Write(b.buffers[0].data)
+		b.dropConsumed(n)
 		ret += int64(n)
-		if n == len(buf.data) {
-			b.returnDataChunk(buf)
-			b.buffers[0] = dataChunk{}
-			b.buffers = b.buffers[1:]
-		} else {
-			b.buffers[0].data = buf.data[n:]
-		}
 		if err != nil {
 			return ret, err
 		}
 	}
 	return ret, nil
+}
+
+func (b *Buffer) dropConsumed(n int) {
+	for n >= len(b.buffers[0].data) {
+		n -= len(b.buffers[0].data)
+		b.returnDataChunk(b.buffers[0])
+		b.buffers[0] = dataChunk{}
+		b.buffers = b.buffers[1:]
+		if n == 0 {
+			return
+		}
+	}
+	b.buffers[0].data = b.buffers[0].data[n:]
 }
 
 // Len returns the number of bytes in the buffer.
