@@ -41,6 +41,9 @@ func (b *Buffer) tryToWritev(w io.Writer) (int64, error) {
 				b.dropConsumed(n)
 				ret += int64(n)
 			}
+			if writevErr == syscall.EINTR || writevErr == syscall.EAGAIN {
+				writevErr = nil
+			}
 			return len(b.buffers) == 0 || writevErr != nil
 		})
 		if writevErr != nil {
