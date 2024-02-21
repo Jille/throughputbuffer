@@ -217,6 +217,8 @@ func (b *Buffer) Reset() {
 // Clone returns a copy of this Buffer. Existing data is shared between the two, but they can be used completely independently.
 // Reads and writes to any of the clones won't affect the other.
 // Clones (and the original) can be cloned again.
+// Clone can only be called concurrently with itself after this Buffer has been cloned at least once.
+// Clone can not be called concurrently with any other methods on *this* Buffer (but is immune to calls on clones of this Buffer).
 func (b *Buffer) Clone() *Buffer {
 	for i, buf := range b.buffers {
 		if buf.refcnt == nil {
