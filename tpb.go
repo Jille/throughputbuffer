@@ -101,6 +101,26 @@ func (b *Buffer) Write(p []byte) (int, error) {
 	return ret, nil
 }
 
+// WriteString is like Write, but accepts a string to potentially save you a copy.
+func (b *Buffer) WriteString(p string) (int, error) {
+	if len(b.buffers) == 0 {
+		b.buffers = append(b.buffers, b.parent.newDataChunk())
+	}
+	ret := len(p)
+	for len(p) > 0 {
+		buf := b.buffers[len(b.buffers)-1]
+		if len(buf.data) < cap(buf.data) && (buf.refcnt == nil || atomic.LoadInt32(buf.refcnt) == 1) {
+			target := buf.data[len(buf.data):cap(buf.data)]
+			n := copy(target, p)
+			b.buffers[len(b.buffers)-1].data = buf.data[:len(buf.data)+n]
+			p = p[n:]
+		} else {
+			b.buffers = append(b.buffers, b.parent.newDataChunk())
+		}
+	}
+	return ret, nil
+}
+
 // ReadFrom reads all data from r and return the number of bytes read and the error from the reader.
 func (b *Buffer) ReadFrom(r io.Reader) (int64, error) {
 	if len(b.buffers) == 0 {
